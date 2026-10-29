@@ -4,6 +4,15 @@ const Customer = require("./customerschema");
 const Crop = require("./cropschema");
 const sendOTPEmail = require("./emailService");
 const PendingVerification = require("./pendingverificationschema");
+const Order = require("./orderschema");
+const Notification = require("./notificationschema");
+const {
+    COMPLETED_ORDER_STATUS,
+    calculateFirstOrderDiscount,
+    isValidObjectId,
+    parseQuantity,
+    toCents
+} = require("./discountService");
 
 // ===============================
 // FARMER REGISTER
@@ -305,566 +314,256 @@ const getCrops = async (req, res) => {
 
 
 
-const Order = require("./orderschema");
-const Notification = require("./notificationschema");
-// const Customer = require("./customerschema");
-// const Farmer = require("./farmerschema");
-// const Crop = require("./cropschema");
-
-
 // =====================================================
 // PLACE ORDER
 // =====================================================
 
-const placeOrder = async (req, res) => {
-
+const previewFirstOrderDiscount = async (req, res) => {
     try {
+        if (!req.body || typeof req.body !== "object" || Array.isArray(req.body)) {
+            return res.status(400).json({ message: "Request body must be a JSON object" });
+        }
+        const { customerId, cropId, quantity } = req.body;
+        const orderQuantity = parseQuantity(quantity);
 
+        if (!isValidObjectId(customerId) || !isValidObjectId(cropId) || orderQuantity === null) {
+            return res.status(400).json({ message: "Valid customer ID, crop ID, and positive quantity are required" });
+        }
+
+        const [customer, crop] = await Promise.all([
+            Customer.findById(customerId),
+            Crop.findById(cropId)
+        ]);
+
+        if (!customer) {
+            return res.status(404).json({ message: "Customer not found" });
+        }
+        if (!crop) {
+            return res.status(404).json({ message: "Crop not found" });
+        }
+        if (orderQuantity > Number(crop.quantity)) {
+            return res.status(409).json({ message: "Insufficient crop stock" });
+        }
+
+        const hasCompletedOrder = Boolean(await Order.exists({
+            customerId: customer._id,
+            orderStatus: COMPLETED_ORDER_STATUS
+        }));
+        const pricing = calculateFirstOrderDiscount({
+            unitPrice: crop.price,
+            quantity: orderQuantity,
+            hasCompletedOrder
+        });
+
+        return res.status(200).json(pricing);
+    } catch (error) {
+        console.error("FIRST ORDER DISCOUNT PREVIEW ERROR", error.name);
+        return res.status(500).json({ message: "Unable to calculate discount" });
+    }
+};
+
+const placeOrder = async (req, res) => {
+    try {
+        if (!req.body || typeof req.body !== "object" || Array.isArray(req.body)) {
+            return res.status(400).json({ message: "Request body must be a JSON object" });
+        }
         const {
             customerId,
-            customerName,
-            customerPhone,
-
             farmerId,
             cropId,
             quantity,
             address,
             paymentMethod
         } = req.body;
-
-
-        // =====================================================
-        // CHECK REQUIRED FIELDS
-        // =====================================================
+        const orderQuantity = parseQuantity(quantity);
 
         if (
-            !customerId ||
-            !customerName ||
-            !customerPhone ||
-            !farmerId ||
-            !cropId ||
-            !quantity ||
-            !address ||
+            !isValidObjectId(customerId) ||
+            !isValidObjectId(farmerId) ||
+            !isValidObjectId(cropId) ||
+            orderQuantity === null ||
+            typeof address !== "string" ||
+            address.trim() === "" ||
             !paymentMethod
         ) {
-
-            return res.status(400).json({
-                message: "All order fields are required"
-            });
-
+            return res.status(400).json({ message: "Valid customer, farmer, crop, quantity, address, and payment method are required" });
+        }
+        if (paymentMethod !== "COD" && paymentMethod !== "UPI") {
+            return res.status(400).json({ message: "Invalid payment method" });
         }
 
-
-        // =====================================================
-        // CHECK PHONE NUMBER
-        // =====================================================
-
-        const phoneRegex = /^[6-9]\d{9}$/;
-
-        if (!phoneRegex.test(customerPhone)) {
-
-            return res.status(400).json({
-                message: "Invalid phone number"
-            });
-
-        }
-
-
-        // =====================================================
-        // CHECK PAYMENT METHOD
-        // =====================================================
-
-        if (
-            paymentMethod !== "COD" &&
-            paymentMethod !== "UPI"
-        ) {
-
-            return res.status(400).json({
-                message: "Invalid payment method"
-            });
-
-        }
-
-
-        // =====================================================
-        // FIND CUSTOMER
-        // =====================================================
-
-        const customer =
-            await Customer.findById(customerId);
+        const [customer, farmer, crop] = await Promise.all([
+            Customer.findById(customerId),
+            Farmer.findById(farmerId),
+            Crop.findById(cropId)
+        ]);
 
         if (!customer) {
-
-            return res.status(404).json({
-                message: "Customer not found"
-            });
-
+            return res.status(404).json({ message: "Customer not found" });
         }
-
-
-        // =====================================================
-        // FIND FARMER
-        // =====================================================
-
-        const farmer =
-            await Farmer.findById(farmerId);
-
         if (!farmer) {
-
-            return res.status(404).json({
-                message: "Farmer not found"
-            });
-
+            return res.status(404).json({ message: "Farmer not found" });
         }
-
-
-        // =====================================================
-        // FIND CROP
-        // =====================================================
-
-        const crop =
-            await Crop.findById(cropId);
-
         if (!crop) {
-
-            return res.status(404).json({
-                message: "Crop not found"
-            });
-
+            return res.status(404).json({ message: "Crop not found" });
+        }
+        if (crop.farmerId.toString() !== farmer._id.toString()) {
+            return res.status(400).json({ message: "This crop does not belong to this farmer" });
         }
 
-
-        // =====================================================
-        // CHECK CROP BELONGS TO FARMER
-        // =====================================================
-
-        if (
-            crop.farmerId.toString() !==
-            farmerId.toString()
-        ) {
-
-            return res.status(400).json({
-                message: "This crop does not belong to this farmer"
-            });
-
-        }
-
-
-        // =====================================================
-        // CHECK ORDER QUANTITY
-        // =====================================================
-
-        const orderQuantity =
-            Number(quantity);
-
-        const availableQuantity =
-            Number(crop.quantity);
-
-
-        if (
-            isNaN(orderQuantity) ||
-            orderQuantity <= 0
-        ) {
-
-            return res.status(400).json({
-                message: "Quantity must be greater than 0"
-            });
-
-        }
-
-
-        // =====================================================
-        // CHECK AVAILABLE QUANTITY
-        // =====================================================
-
-        if (
-            orderQuantity >
-            availableQuantity
-        ) {
-
-            return res.status(400).json({
-
-                message:
-                    `Only ${availableQuantity} ${crop.unit} available`
-
-            });
-
-        }
-
-
-        // =====================================================
-        // CALCULATE TOTAL PRICE
-        // =====================================================
-
-        const totalAmount =
-            Number(crop.price) *
-            orderQuantity;
-
-
-        // =====================================================
-        // CREATE ORDER
-        // =====================================================
-
-        const newOrder = new Order({
-
+        const hasCompletedOrder = Boolean(await Order.exists({
             customerId: customer._id,
-
-            // Customer details
-            customerName: customer.name,
-
-            customerPhone: customer.phone,
-
-            customerEmail: customer.email,
-
-            // Farmer details
-            farmerId: farmer._id,
-
-            // Crop details
-            cropId: crop._id,
-
-            cropName: crop.cropName,
-
+            orderStatus: COMPLETED_ORDER_STATUS
+        }));
+        const pricing = calculateFirstOrderDiscount({
+            unitPrice: crop.price,
             quantity: orderQuantity,
-
-            unit: crop.unit,
-
-            price: Number(crop.price),
-
-            totalAmount: totalAmount,
-
-            address: address.trim(),
-
-            paymentMethod: paymentMethod,
-
-            paymentStatus: "Pending",
-
-            orderStatus: "Pending"
-
+            hasCompletedOrder
         });
 
+        const reservedCrop = await Crop.findOneAndUpdate(
+            { _id: crop._id, quantity: { $gte: orderQuantity } },
+            { $inc: { quantity: -orderQuantity } },
+            { new: true }
+        );
+        if (!reservedCrop) {
+            return res.status(409).json({ message: "Insufficient crop stock" });
+        }
 
-        // =====================================================
-        // SAVE ORDER
-        // =====================================================
-
-        const savedOrder =
-            await newOrder.save();
-
-
-        // =====================================================
-        // REDUCE CROP QUANTITY
-        // =====================================================
-
-        const remainingQuantity =
-            availableQuantity -
-            orderQuantity;
-
-
-        crop.quantity =
-            remainingQuantity;
-
-
-        // Save updated quantity in MongoDB
-        await crop.save();
-
-
-        console.log("=================================");
-        console.log("CROP QUANTITY UPDATED");
-        console.log("Crop:", crop.cropName);
-        console.log("Old Quantity:", availableQuantity);
-        console.log("Ordered Quantity:", orderQuantity);
-        console.log("Remaining Quantity:", remainingQuantity);
-        console.log("=================================");
-
-
-        // =====================================================
-        // CREATE NOTIFICATION
-        // =====================================================
-
-        const notificationMessage =
-            `New order received for ${crop.cropName}. ` +
-            `Quantity: ${orderQuantity} ${crop.unit}. ` +
-            `Total Amount: ₹${totalAmount}. ` +
-            `Payment: ${paymentMethod}. ` +
-            `Customer: ${customer.name}. ` +
-            `Phone: ${customer.phone}.`;
-
-
-        const newNotification =
-            new Notification({
-
+        let savedOrder;
+        try {
+            savedOrder = await Order.create({
+                customerId: customer._id,
+                customerName: customer.name,
+                customerPhone: customer.phone,
+                customerEmail: customer.email,
                 farmerId: farmer._id,
-
-                orderId: savedOrder._id,
-
-                message: notificationMessage,
-
-                isRead: false
-
+                cropId: crop._id,
+                cropName: crop.cropName,
+                quantity: orderQuantity,
+                unit: crop.unit,
+                price: toCents(crop.price) / 100,
+                subtotal: pricing.subtotal,
+                discountPercentage: pricing.discountPercentage,
+                discountAmount: pricing.discountAmount,
+                finalAmount: pricing.finalAmount,
+                totalAmount: pricing.finalAmount,
+                address: address.trim(),
+                paymentMethod,
+                paymentStatus: "Pending",
+                orderStatus: "Pending"
             });
+        } catch (error) {
+            try {
+                await Crop.updateOne({ _id: crop._id }, { $inc: { quantity: orderQuantity } });
+            } catch (rollbackError) {
+                console.error("ORDER STOCK ROLLBACK FAILED", rollbackError.name);
+            }
+            throw error;
+        }
 
-
-        await newNotification.save();
-
-
-        // =====================================================
-        // SEND RESPONSE
-        // =====================================================
+        let notification = null;
+        let warning;
+        try {
+            notification = await Notification.create({
+                farmerId: farmer._id,
+                orderId: savedOrder._id,
+                message: `New order received for ${crop.cropName}. Quantity: ${orderQuantity} ${crop.unit}. Total Amount: ₹${pricing.finalAmount}. Payment: ${paymentMethod}. Customer: ${customer.name}. Phone: ${customer.phone}.`,
+                isRead: false
+            });
+        } catch (error) {
+            console.error("ORDER NOTIFICATION CREATION FAILED", error.name);
+            warning = "Order placed, but the farmer notification could not be created";
+        }
 
         return res.status(201).json({
-
             message: "Order placed successfully",
-
+            ...(warning ? { warning } : {}),
             order: savedOrder,
-
-            notification: newNotification,
-
-            remainingQuantity: remainingQuantity
-
+            notification,
+            remainingQuantity: reservedCrop.quantity
         });
-
-
     } catch (error) {
-
-        console.log(
-            "PLACE ORDER ERROR:",
-            error
-        );
-
-
-        return res.status(500).json({
-
-            message: "Error placing order",
-
-            error: error.message
-
-        });
-
+        console.error("PLACE ORDER ERROR", error.name);
+        return res.status(500).json({ message: "Error placing order" });
     }
-
 };
-
-
-
-// =====================================================
-// GET FARMER NOTIFICATIONS
-// =====================================================
 
 const getFarmerNotifications = async (req, res) => {
-
     try {
-
         const { farmerId } = req.params;
-
-
-        if (!farmerId) {
-
-            return res.status(400).json({
-
-                message: "Farmer ID is required"
-
-            });
+        if (!isValidObjectId(farmerId)) {
+            return res.status(400).json({ message: "Valid farmer ID is required" });
         }
 
-
-        // Get notifications only for this farmer
-        const notifications = await Notification
-            .find({ farmerId: farmerId })
-
+        const notifications = await Notification.find({ farmerId })
             .populate({
                 path: "orderId",
-
                 populate: {
                     path: "customerId",
-
-                    select:
-                        "name phone email address"
+                    select: "name phone email address"
                 }
             })
-
-            .sort({
-                createdAt: -1
-            });
-
+            .sort({ createdAt: -1 });
 
         return res.status(200).json({
-
-            message:
-                "Farmer notifications fetched successfully",
-
-            notifications: notifications
-
+            message: "Farmer notifications fetched successfully",
+            notifications
         });
-
-
     } catch (error) {
-
-        console.log(
-            "Get farmer notifications error:",
-            error
-        );
-
-
-        return res.status(500).json({
-
-            message:
-                "Error getting farmer notifications",
-
-            error: error.message
-
-        });
+        console.error("GET FARMER NOTIFICATIONS ERROR", error.name);
+        return res.status(500).json({ message: "Error getting farmer notifications" });
     }
 };
-
-
 
 const getCustomerOrders = async (req, res) => {
     try {
-
         const { customerId } = req.params;
-
-        console.log("================================");
-        console.log("GET CUSTOMER ORDERS");
-        console.log("Customer ID:", customerId);
-        console.log("================================");
-
-        if (!customerId) {
-            return res.status(400).json({
-                message: "Customer ID is required"
-            });
+        if (!isValidObjectId(customerId)) {
+            return res.status(400).json({ message: "Valid customer ID is required" });
         }
 
-        // Check whether customer exists
         const customer = await Customer.findById(customerId);
-
         if (!customer) {
-            return res.status(404).json({
-                message: "Customer not found"
-            });
+            return res.status(404).json({ message: "Customer not found" });
         }
 
-        // Get customer's orders
-        const orders = await Order.find({
-            customerId: customerId
-        }).sort({
-            createdAt: -1
-        });
-
-        console.log("Number of orders:", orders.length);
-        console.log("Customer orders:", orders);
-
+        const orders = await Order.find({ customerId }).sort({ createdAt: -1 });
         return res.status(200).json({
             message: "Customer orders fetched successfully",
-            orders: orders
+            orders
         });
-
     } catch (error) {
-
-        console.log("================================");
-        console.log("GET CUSTOMER ORDERS ERROR");
-        console.log(error);
-        console.log("================================");
-
-        return res.status(500).json({
-            message: "Error getting customer orders",
-            error: error.message
-        });
+        console.error("GET CUSTOMER ORDERS ERROR", error.name);
+        return res.status(500).json({ message: "Error getting customer orders" });
     }
 };
 
-
-// =====================================================
-// GET ORDERS FOR FARMER
-// =====================================================
-
-
 const getFarmerOrders = async (req, res) => {
-
     try {
-
         const { farmerId } = req.params;
-
-        console.log("=================================");
-        console.log("FARMER ORDERS");
-        console.log("Farmer ID:", farmerId);
-        console.log("=================================");
-
-        if (!farmerId) {
-            return res.status(400).json({
-                message: "Farmer ID is required"
-            });
+        if (!isValidObjectId(farmerId)) {
+            return res.status(400).json({ message: "Valid farmer ID is required" });
         }
 
-        const orders = await Order.find({
-            farmerId: farmerId
-        }).sort({
-            createdAt: -1
-        });
-
-        console.log("Number of orders:", orders.length);
-
-        // Check every customer
-        for (const order of orders) {
-
-            console.log(
-                "Order ID:",
-                order._id
-            );
-
-            console.log(
-                "Customer ID in order:",
-                order.customerId
-            );
-
-            const customer = await Customer.findById(
-                order.customerId
-            );
-
-            console.log(
-                "Customer found:",
-                customer
-            );
-        }
-
+        const orders = await Order.find({ farmerId }).sort({ createdAt: -1 });
         return res.status(200).json({
-
             message: "Farmer orders fetched successfully",
-
-            orders: orders
-
+            orders
         });
-
     } catch (error) {
-
-        console.log(
-            "GET FARMER ORDERS ERROR:",
-            error
-        );
-
-        return res.status(500).json({
-
-            message: "Error getting farmer orders",
-
-            error: error.message
-
-        });
-
+        console.error("GET FARMER ORDERS ERROR", error.name);
+        return res.status(500).json({ message: "Error getting farmer orders" });
     }
-
 };
 
 const markOrderDelivered = async (req, res) => {
     try {
         const { orderId } = req.params;
 
-        console.log("================================");
-        console.log("MARK ORDER AS DELIVERED");
-        console.log("Order ID:", orderId);
-        console.log("================================");
-
-        if (!orderId) {
+        if (!isValidObjectId(orderId)) {
             return res.status(400).json({
-                message: "Order ID is required"
+                message: "Valid order ID is required"
             });
         }
 
@@ -876,11 +575,14 @@ const markOrderDelivered = async (req, res) => {
             });
         }
 
-        order.orderStatus = "Delivered";
+        if (order.paymentMethod === "UPI" && order.paymentStatus !== "Paid") {
+            return res.status(400).json({
+                message: "UPI payment must be verified before delivery"
+            });
+        }
 
+        order.orderStatus = COMPLETED_ORDER_STATUS;
         await order.save();
-
-        console.log("Order updated successfully");
 
         return res.status(200).json({
             message: "Order marked as Delivered",
@@ -888,11 +590,9 @@ const markOrderDelivered = async (req, res) => {
         });
 
     } catch (error) {
-        console.log("MARK DELIVERED ERROR:", error);
-
+        console.error("MARK DELIVERED ERROR", error.name);
         return res.status(500).json({
-            message: "Error updating order",
-            error: error.message
+            message: "Error updating order"
         });
     }
 };
@@ -1644,10 +1344,9 @@ const resetPassword = async (req, res) => {
 module.exports = {
 
     registerFarmer, registerCustomer, addCrop,
-    getFarmerCrops, getCrops, placeOrder,
+    getFarmerCrops, getCrops, placeOrder, previewFirstOrderDiscount,
     getFarmerNotifications, getCustomerOrders, getFarmerOrders,
     markOrderDelivered, verifyOTP, sendOTP,
     forgotPassword, verifyForgotPasswordOTP, resetPassword
 
 };
-

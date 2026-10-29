@@ -54,9 +54,43 @@ const orderSchema = new mongoose.Schema({
         required: true
     },
 
+    subtotal: {
+        type: Number,
+        default: function () {
+            return this.totalAmount;
+        }
+    },
+
+    discountPercentage: {
+        type: Number,
+        default: 0
+    },
+
+    discountAmount: {
+        type: Number,
+        default: 0
+    },
+
+    finalAmount: {
+        type: Number,
+        default: function () {
+            return this.totalAmount;
+        }
+    },
+
     totalAmount: {
         type: Number,
         required: true
+    },
+
+    razorpayOrderId: {
+        type: String,
+        default: null
+    },
+
+    razorpayPaymentId: {
+        type: String,
+        default: null
     },
 
     address: {

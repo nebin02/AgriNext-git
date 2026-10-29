@@ -1,12 +1,11 @@
 const express = require("express");
-const Razorpay = require("razorpay");
-
 const {
     registerFarmer,
     registerCustomer, addCrop,
     getFarmerCrops,
     getCrops,
     placeOrder,
+    previewFirstOrderDiscount,
     getFarmerNotifications,
     getCustomerOrders,
     getFarmerOrders,
@@ -17,10 +16,7 @@ const {
     verifyForgotPasswordOTP,
     resetPassword
 } = require("./controller");
-const razorpay = new Razorpay({
-    key_id: process.env.RAZORPAY_KEY_ID,
-    key_secret: process.env.RAZORPAY_KEY_SECRET
-});
+const { createPayment, verifyPayment } = require("./paymentController");
 const { signin } = require("./signincontroller");
 
 const router = express.Router();
@@ -33,6 +29,7 @@ router.post("/signin", signin);
 router.get("/crops/farmer/:farmerId", getFarmerCrops);
 router.get("/crops", getCrops);
 router.post("/order/place", placeOrder);
+router.post("/discount/first-order/preview", previewFirstOrderDiscount);
 router.get("/notifications/farmer/:farmerId", getFarmerNotifications);
 router.get("/orders/customer/:customerId", getCustomerOrders);
 router.get("/orders/farmer/:farmerId",getFarmerOrders);
@@ -45,31 +42,7 @@ router.post("/forgot-password", forgotPassword);
 router.post("/verify-forgot-password-otp",verifyForgotPasswordOTP);
 router.post("/reset-password",resetPassword);
 
-// Razorpay
-router.post("/payment/create", async (req, res) => {
-    try {
-        const { amount } = req.body;
-
-        const order = await razorpay.orders.create({
-            amount: amount * 100,
-            currency: "INR",
-            receipt: "receipt_" + Date.now()
-        });
-
-        res.json({
-            success: true,
-            order: order
-        });
-
-    } catch (error) {
-        console.log(error);
-
-        res.status(500).json({
-            success: false,
-            message: "Payment order creation failed"
-        });
-    }
-});
-
+router.post("/payment/create", createPayment);
+router.post("/payment/verify", verifyPayment);
 
 module.exports = router;
