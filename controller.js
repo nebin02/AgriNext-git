@@ -8,6 +8,8 @@ const Order = require("./orderschema");
 const Notification = require("./notificationschema");
 const getSupabase = require("./supabase");
 const crypto = require("node:crypto");
+const { createOtp, hashOtp, verifyOtp } = require("./otpUtils");
+const { EmailDeliveryError } = sendOTPEmail;
 const {
     COMPLETED_ORDER_STATUS,
     calculateFirstOrderDiscount,
@@ -20,175 +22,23 @@ const {
 // FARMER REGISTER
 // ===============================
 
-const registerFarmer = async (req, res) => {
-
-    try {
-
-        const {
-            name,
-            email,
-            phone,
-            password,
-            address,
-            farmLocation
-        } = req.body;
-
-        if (
-            !name ||
-            !email ||
-            !phone ||
-            !password ||
-            !address ||
-            !farmLocation
-        ) {
-
-            return res.status(400).json({
-                message: "All fields are required"
-            });
-
-        }
-
-        const existingFarmer = await Farmer.findOne({ email });
-
-        if (existingFarmer) {
-
-            return res.status(400).json({
-                message: "Email already registered"
-            });
-
-        }
-
-        // Generate 6 digit OTP
-        const otp = Math.floor(
-            100000 + Math.random() * 900000
-        ).toString();
-
-        // OTP expires after 5 minutes
-        const otpExpires = new Date(
-            Date.now() + 5 * 60 * 1000
-        );
-
-        const farmer = new Farmer({
-
-            name,
-            email,
-            phone,
-            password,
-            address,
-            farmLocation,
-
-            otp,
-            otpExpires,
-
-            isVerified: false
-
-        });
-
-        await farmer.save();
-
-        // Send OTP
-        await sendOTPEmail(email, otp);
-
-        res.status(201).json({
-
-            message: "Registration successful. OTP sent to your email.",
-
-            email: email,
-
-            userType: "farmer"
-
-        });
-
-    } catch (error) {
-
-        console.error("Farmer registration error:", error);
-
-        res.status(500).json({
-            message: "Registration failed"
-        });
-
-    }
+const registerFarmer = (req, res, next) => {
+    req.registrationRoute = true;
+    return sendOTP({
+        ...req,
+        body: { ...(req.body || {}), userType: "farmer" }
+    }, res, next);
 };
 // ===============================
 // CUSTOMER REGISTER
 // ===============================
 
-const registerCustomer = async (req, res) => {
-
-    try {
-
-        const {
-            name,
-            email,
-            phone,
-            password,
-            address
-        } = req.body;
-
-        if (!name || !email || !phone || !password || !address) {
-            return res.status(400).json({
-                message: "All fields are required"
-            });
-        }
-
-        const existingCustomer = await Customer.findOne({ email });
-
-        if (existingCustomer) {
-
-            return res.status(400).json({
-                message: "Email already registered"
-            });
-        }
-
-        // Generate 6 digit OTP
-        const otp = Math.floor(
-            100000 + Math.random() * 900000
-        ).toString();
-
-        // OTP valid for 5 minutes
-        const otpExpires = new Date(
-            Date.now() + 5 * 60 * 1000
-        );
-
-        const customer = new Customer({
-
-            name,
-            email,
-            phone,
-            password,
-            address,
-
-            otp,
-            otpExpires,
-
-            isVerified: false
-
-        });
-
-        await customer.save();
-
-        // Send OTP
-        await sendOTPEmail(email, otp);
-
-        res.status(201).json({
-
-            message: "Registration successful. OTP sent to your email.",
-
-            email: email,
-
-            userType: "customer"
-
-        });
-
-    } catch (error) {
-
-        console.error("Customer registration error:", error);
-
-        res.status(500).json({
-            message: "Registration failed"
-        });
-
-    }
+const registerCustomer = (req, res, next) => {
+    req.registrationRoute = true;
+    return sendOTP({
+        ...req,
+        body: { ...(req.body || {}), userType: "customer" }
+    }, res, next);
 };
 
 // ===============================
@@ -637,6 +487,9 @@ const markOrderDelivered = async (req, res) => {
 // =====================================================
 
 const sendOTP = async (req, res) => {
+    let pendingVerification;
+    let otpHash;
+
     try {
         const {
             name,
@@ -646,7 +499,7 @@ const sendOTP = async (req, res) => {
             address,
             farmLocation,
             userType
-        } = req.body;
+        } = req.body || {};
 
         // ---------------------------------------------
         // VALIDATION
@@ -663,6 +516,10 @@ const sendOTP = async (req, res) => {
             return res.status(400).json({
                 message: "All required fields must be filled"
             });
+        }
+
+        if (typeof email !== "string" || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) {
+            return res.status(400).json({ message: "Enter a valid email address" });
         }
 
         if (userType === "farmer" && !farmLocation) {
@@ -684,12 +541,13 @@ const sendOTP = async (req, res) => {
         // CHECK WHETHER EMAIL ALREADY EXISTS
         // ---------------------------------------------
 
+        const normalizedEmail = email.trim().toLowerCase();
         const existingCustomer = await Customer.findOne({
-            email
+            email: normalizedEmail
         });
 
         const existingFarmer = await Farmer.findOne({
-            email
+            email: normalizedEmail
         });
 
         if (existingCustomer || existingFarmer) {
@@ -702,13 +560,31 @@ const sendOTP = async (req, res) => {
         // GENERATE 6 DIGIT OTP
         // ---------------------------------------------
 
-        const otp = Math.floor(
-            100000 + Math.random() * 900000
-        ).toString();
+        const existingPending = await PendingVerification.findOne({
+            email: normalizedEmail,
+            userType
+        });
+        const now = new Date();
+        const resendDelayMs = 60 * 1000;
+        if (
+            existingPending?.lastOtpSentAt &&
+            now.getTime() - existingPending.lastOtpSentAt.getTime() < resendDelayMs
+        ) {
+            const retryAfterSeconds = Math.ceil(
+                (resendDelayMs - (now.getTime() - existingPending.lastOtpSentAt.getTime())) / 1000
+            );
+            return res.status(429).json({
+                message: "Please wait before requesting another verification code",
+                retryAfterSeconds
+            });
+        }
+
+        const otp = createOtp();
+        otpHash = hashOtp(otp);
 
         // OTP valid for 5 minutes
         const otpExpires = new Date(
-            Date.now() + 5 * 60 * 1000
+            now.getTime() + 5 * 60 * 1000
         );
 
 
@@ -717,14 +593,14 @@ const sendOTP = async (req, res) => {
         // SAVE TEMPORARY REGISTRATION DATA
         // ---------------------------------------------
 
-        await PendingVerification.findOneAndUpdate(
+        pendingVerification = await PendingVerification.findOneAndUpdate(
             {
-                email,
+                email: normalizedEmail,
                 userType
             },
             {
                 name,
-                email,
+                email: normalizedEmail,
                 phone,
                 password: password,
                 address,
@@ -733,8 +609,10 @@ const sendOTP = async (req, res) => {
                         ? farmLocation
                         : "",
                 userType,
-                otp,
-                otpExpires
+                otp: otpHash,
+                otpExpires,
+                otpAttempts: 0,
+                lastOtpSentAt: now
             },
             {
                 upsert: true,
@@ -746,25 +624,38 @@ const sendOTP = async (req, res) => {
         // SEND OTP EMAIL
         // ---------------------------------------------
 
-        await sendOTPEmail(email, otp);
+        await sendOTPEmail(normalizedEmail, otp);
 
-        return res.status(200).json({
-            message: "OTP sent successfully",
-            email,
+        return res.status(req.registrationRoute ? 201 : 200).json({
+            message: req.registrationRoute
+                ? "Registration successful. OTP sent to your email."
+                : "OTP sent successfully",
+            email: normalizedEmail,
             userType
         });
 
     } catch (error) {
+        if (error instanceof EmailDeliveryError) {
+            console.error("SEND OTP ERROR:", error.code, error.message);
+            if (pendingVerification && otpHash) {
+                try {
+                    await PendingVerification.deleteOne({
+                        _id: pendingVerification._id,
+                        otp: otpHash
+                    });
+                } catch (cleanupError) {
+                    console.error(
+                        "Pending OTP cleanup failed:",
+                        cleanupError.name,
+                        cleanupError.code || ""
+                    );
+                }
+            }
+            return res.status(error.statusCode).json({ message: error.publicMessage });
+        }
 
-        console.error(
-            "SEND OTP ERROR:",
-            error
-        );
-
-        return res.status(500).json({
-            message: "Failed to send OTP",
-            error: error.message
-        });
+        console.error("SEND OTP ERROR:", error.name, error.code || "");
+        return res.status(500).json({ message: "Unable to process registration right now" });
     }
 };
 // =====================================================
@@ -777,16 +668,22 @@ const verifyOTP = async (req, res) => {
             email,
             otp,
             userType
-        } = req.body;
+        } = req.body || {};
 
         // ---------------------------------------------
         // VALIDATION
         // ---------------------------------------------
 
-        if (!email || !otp || !userType) {
+        if (
+            typeof email !== "string" ||
+            typeof otp !== "string" ||
+            !/^\d{6}$/.test(otp) ||
+            !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim()) ||
+            !["customer", "farmer"].includes(userType)
+        ) {
             return res.status(400).json({
                 message:
-                    "Email, OTP and user type are required"
+                    "A valid email, six-digit OTP and user type are required"
             });
         }
 
@@ -796,7 +693,7 @@ const verifyOTP = async (req, res) => {
 
         const pendingUser =
             await PendingVerification.findOne({
-                email,
+                email: email.trim().toLowerCase(),
                 userType
             });
 
@@ -811,24 +708,40 @@ const verifyOTP = async (req, res) => {
         // CHECK OTP
         // ---------------------------------------------
 
-        if (pendingUser.otp !== otp) {
-            return res.status(400).json({
-                message: "Invalid OTP"
-            });
-        }
-
-        // ---------------------------------------------
-        // CHECK OTP EXPIRY
-        // ---------------------------------------------
-
         if (
             !pendingUser.otpExpires ||
-            new Date() > new Date(pendingUser.otpExpires)
+            Date.now() >= new Date(pendingUser.otpExpires).getTime()
         ) {
             return res.status(400).json({
                 message:
                     "OTP has expired. Please request a new OTP."
             });
+        }
+
+        if (pendingUser.otpAttempts >= 5) {
+            return res.status(429).json({
+                message: "Too many incorrect verification attempts. Request a new code."
+            });
+        }
+
+        if (!verifyOtp(otp, pendingUser.otp)) {
+            const updatedPending = await PendingVerification.findOneAndUpdate(
+                {
+                    _id: pendingUser._id,
+                    $or: [
+                        { otpAttempts: { $lt: 5 } },
+                        { otpAttempts: { $exists: false } }
+                    ]
+                },
+                { $inc: { otpAttempts: 1 } },
+                { new: true }
+            );
+            if (!updatedPending || updatedPending.otpAttempts >= 5) {
+                return res.status(429).json({
+                    message: "Too many incorrect verification attempts. Request a new code."
+                });
+            }
+            return res.status(400).json({ message: "Invalid OTP" });
         }
 
         // ---------------------------------------------
@@ -837,12 +750,12 @@ const verifyOTP = async (req, res) => {
 
         const existingCustomer =
             await Customer.findOne({
-                email
+                email: pendingUser.email
             });
 
         const existingFarmer =
             await Farmer.findOne({
-                email
+                email: pendingUser.email
             });
 
         if (existingCustomer || existingFarmer) {
@@ -905,6 +818,8 @@ const verifyOTP = async (req, res) => {
             });
 
             await newUser.save();
+        } else {
+            return res.status(400).json({ message: "Invalid user type" });
         }
 
         // ---------------------------------------------
@@ -927,17 +842,11 @@ const verifyOTP = async (req, res) => {
         });
 
     } catch (error) {
-
-        console.error(
-            "VERIFY OTP ERROR:",
-            error
-        );
-
-        return res.status(500).json({
-            message:
-                "OTP verification failed",
-            error: error.message
-        });
+        if (error.code === 11000) {
+            return res.status(409).json({ message: "Email is already registered" });
+        }
+        console.error("VERIFY OTP ERROR:", error.name, error.code || "");
+        return res.status(500).json({ message: "OTP verification failed" });
     }
 };
 // =====================================================
@@ -945,15 +854,21 @@ const verifyOTP = async (req, res) => {
 // =====================================================
 
 const forgotPassword = async (req, res) => {
+    let user;
+
     try {
 
-        const { email, userType } = req.body;
+        const { email, userType } = req.body || {};
 
         // ---------------------------------------------
         // VALIDATION
         // ---------------------------------------------
 
-        if (!email || !userType) {
+        if (
+            typeof email !== "string" ||
+            !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim()) ||
+            !userType
+        ) {
             return res.status(400).json({
                 message: "Email and user type are required"
             });
@@ -972,15 +887,13 @@ const forgotPassword = async (req, res) => {
         // FIND USER
         // ---------------------------------------------
 
-        let user;
-
         if (userType === "customer") {
 
-            user = await Customer.findOne({ email });
+            user = await Customer.findOne({ email: email.trim().toLowerCase() });
 
         } else {
 
-            user = await Farmer.findOne({ email });
+            user = await Farmer.findOne({ email: email.trim().toLowerCase() });
 
         }
 
@@ -988,9 +901,25 @@ const forgotPassword = async (req, res) => {
         // CHECK USER
         // ---------------------------------------------
 
+        const normalizedEmail = email.trim().toLowerCase();
         if (!user) {
-            return res.status(404).json({
-                message: "No account found with this email"
+            return res.status(200).json({
+                message: "If an account exists for this email, a password reset code will be sent",
+                email: normalizedEmail,
+                userType
+            });
+        }
+
+        const now = new Date();
+        const resendDelayMs = 60 * 1000;
+        if (
+            user.lastOtpSentAt &&
+            now.getTime() - user.lastOtpSentAt.getTime() < resendDelayMs
+        ) {
+            return res.status(200).json({
+                message: "If an account exists for this email, a password reset code will be sent",
+                email: normalizedEmail,
+                userType
             });
         }
 
@@ -998,22 +927,20 @@ const forgotPassword = async (req, res) => {
         // GENERATE OTP
         // ---------------------------------------------
 
-        const otp = Math.floor(
-            100000 + Math.random() * 900000
-        ).toString();
+        const otp = createOtp();
 
         // OTP valid for 5 minutes
 
-        const otpExpires = new Date(
-            Date.now() + 5 * 60 * 1000
-        );
+        const otpExpires = new Date(now.getTime() + 5 * 60 * 1000);
 
         // ---------------------------------------------
         // SAVE OTP
         // ---------------------------------------------
 
-        user.otp = otp;
+        user.otp = hashOtp(otp);
         user.otpExpires = otpExpires;
+        user.otpAttempts = 0;
+        user.lastOtpSentAt = now;
 
         await user.save();
 
@@ -1021,36 +948,41 @@ const forgotPassword = async (req, res) => {
         // SEND EMAIL
         // ---------------------------------------------
 
-        await sendOTPEmail(email, otp);
+        await sendOTPEmail(normalizedEmail, otp);
 
         // ---------------------------------------------
         // RESPONSE
         // ---------------------------------------------
 
         return res.status(200).json({
-
-            message: "Password reset OTP sent successfully",
-
-            email: email,
-
-            userType: userType
-
+            message: "If an account exists for this email, a password reset code will be sent",
+            email: normalizedEmail,
+            userType
         });
 
     } catch (error) {
+        if (error instanceof EmailDeliveryError) {
+            console.error("FORGOT PASSWORD EMAIL ERROR:", error.code, error.message);
+            if (user) {
+                user.otp = null;
+                user.otpExpires = null;
+                user.otpAttempts = 0;
+                user.lastOtpSentAt = null;
+                try {
+                    await user.save();
+                } catch (cleanupError) {
+                    console.error(
+                        "Password reset OTP cleanup failed:",
+                        cleanupError.name,
+                        cleanupError.code || ""
+                    );
+                }
+            }
+            return res.status(error.statusCode).json({ message: error.publicMessage });
+        }
 
-        console.error(
-            "FORGOT PASSWORD ERROR:",
-            error
-        );
-
-        return res.status(500).json({
-
-            message: "Failed to send password reset OTP",
-
-            error: error.message
-
-        });
+        console.error("FORGOT PASSWORD ERROR:", error.name, error.code || "");
+        return res.status(500).json({ message: "Failed to send password reset OTP" });
 
     }
 };
@@ -1068,14 +1000,20 @@ const verifyForgotPasswordOTP = async (req, res) => {
             email,
             otp,
             userType
-        } = req.body;
+        } = req.body || {};
 
 
         // ---------------------------------------------
         // VALIDATION
         // ---------------------------------------------
 
-        if (!email || !otp || !userType) {
+        if (
+            typeof email !== "string" ||
+            typeof otp !== "string" ||
+            !/^\d{6}$/.test(otp) ||
+            !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim()) ||
+            !userType
+        ) {
 
             return res.status(400).json({
 
@@ -1096,13 +1034,13 @@ const verifyForgotPasswordOTP = async (req, res) => {
         if (userType === "customer") {
 
             user = await Customer.findOne({
-                email
+                email: email.trim().toLowerCase()
             });
 
         } else if (userType === "farmer") {
 
             user = await Farmer.findOne({
-                email
+                email: email.trim().toLowerCase()
             });
 
         } else {
@@ -1121,13 +1059,7 @@ const verifyForgotPasswordOTP = async (req, res) => {
         // ---------------------------------------------
 
         if (!user) {
-
-            return res.status(404).json({
-
-                message:
-                    "No account found with this email"
-
-            });
+            return res.status(400).json({ message: "Invalid or expired OTP" });
 
         }
 
@@ -1136,33 +1068,24 @@ const verifyForgotPasswordOTP = async (req, res) => {
         // CHECK OTP
         // ---------------------------------------------
 
-        if (user.otp !== otp) {
-
-            return res.status(400).json({
-
-                message: "Invalid OTP"
-
-            });
-
+        if (!user.otpExpires || Date.now() >= new Date(user.otpExpires).getTime()) {
+            return res.status(400).json({ message: "Invalid or expired OTP" });
         }
 
-
-        // ---------------------------------------------
-        // CHECK OTP EXPIRY
-        // ---------------------------------------------
-
-        if (
-            !user.otpExpires ||
-            new Date() > new Date(user.otpExpires)
-        ) {
-
-            return res.status(400).json({
-
-                message:
-                    "OTP has expired. Please request a new OTP."
-
+        if ((user.otpAttempts || 0) >= 5) {
+            return res.status(429).json({
+                message: "Too many incorrect verification attempts. Request a new code."
             });
+        }
 
+        if (!verifyOtp(otp, user.otp)) {
+            user.otpAttempts = (user.otpAttempts || 0) + 1;
+            await user.save();
+            return res.status(user.otpAttempts >= 5 ? 429 : 400).json({
+                message: user.otpAttempts >= 5
+                    ? "Too many incorrect verification attempts. Request a new code."
+                    : "Invalid OTP"
+            });
         }
 
 
@@ -1179,19 +1102,8 @@ const verifyForgotPasswordOTP = async (req, res) => {
 
     } catch (error) {
 
-        console.error(
-            "VERIFY FORGOT PASSWORD OTP ERROR:",
-            error
-        );
-
-        return res.status(500).json({
-
-            message:
-                "OTP verification failed",
-
-            error: error.message
-
-        });
+        console.error("VERIFY FORGOT PASSWORD OTP ERROR:", error.name, error.code || "");
+        return res.status(500).json({ message: "OTP verification failed" });
 
     }
 
@@ -1211,7 +1123,7 @@ const resetPassword = async (req, res) => {
             otp,
             userType,
             newPassword
-        } = req.body;
+        } = req.body || {};
 
 
         // ---------------------------------------------
@@ -1220,7 +1132,8 @@ const resetPassword = async (req, res) => {
 
         if (
             !email ||
-            !otp ||
+            typeof otp !== "string" ||
+            !/^\d{6}$/.test(otp) ||
             !userType ||
             !newPassword
         ) {
@@ -1260,13 +1173,13 @@ const resetPassword = async (req, res) => {
         if (userType === "customer") {
 
             user = await Customer.findOne({
-                email
+                email: email.trim().toLowerCase()
             });
 
         } else if (userType === "farmer") {
 
             user = await Farmer.findOne({
-                email
+                email: email.trim().toLowerCase()
             });
 
         } else {
@@ -1285,13 +1198,7 @@ const resetPassword = async (req, res) => {
         // ---------------------------------------------
 
         if (!user) {
-
-            return res.status(404).json({
-
-                message:
-                    "No account found with this email"
-
-            });
+            return res.status(400).json({ message: "Invalid or expired OTP" });
 
         }
 
@@ -1300,33 +1207,24 @@ const resetPassword = async (req, res) => {
         // CHECK OTP AGAIN
         // ---------------------------------------------
 
-        if (user.otp !== otp) {
-
-            return res.status(400).json({
-
-                message: "Invalid OTP"
-
-            });
-
+        if (!user.otpExpires || Date.now() >= new Date(user.otpExpires).getTime()) {
+            return res.status(400).json({ message: "Invalid or expired OTP" });
         }
 
-
-        // ---------------------------------------------
-        // CHECK OTP EXPIRY
-        // ---------------------------------------------
-
-        if (
-            !user.otpExpires ||
-            new Date() > new Date(user.otpExpires)
-        ) {
-
-            return res.status(400).json({
-
-                message:
-                    "OTP has expired. Please request a new OTP."
-
+        if ((user.otpAttempts || 0) >= 5) {
+            return res.status(429).json({
+                message: "Too many incorrect verification attempts. Request a new code."
             });
+        }
 
+        if (!verifyOtp(otp, user.otp)) {
+            user.otpAttempts = (user.otpAttempts || 0) + 1;
+            await user.save();
+            return res.status(user.otpAttempts >= 5 ? 429 : 400).json({
+                message: user.otpAttempts >= 5
+                    ? "Too many incorrect verification attempts. Request a new code."
+                    : "Invalid OTP"
+            });
         }
 
 
@@ -1340,6 +1238,8 @@ const resetPassword = async (req, res) => {
 
         user.otp = null;
         user.otpExpires = null;
+        user.otpAttempts = 0;
+        user.lastOtpSentAt = null;
 
         await user.save();
 
@@ -1357,19 +1257,8 @@ const resetPassword = async (req, res) => {
 
     } catch (error) {
 
-        console.error(
-            "RESET PASSWORD ERROR:",
-            error
-        );
-
-        return res.status(500).json({
-
-            message:
-                "Failed to reset password",
-
-            error: error.message
-
-        });
+        console.error("RESET PASSWORD ERROR:", error.name, error.code || "");
+        return res.status(500).json({ message: "Failed to reset password" });
 
     }
 

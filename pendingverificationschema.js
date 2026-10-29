@@ -45,6 +45,16 @@ const pendingVerificationSchema = new mongoose.Schema({
     otpExpires: {
         type: Date,
         required: true
+    },
+
+    otpAttempts: {
+        type: Number,
+        default: 0
+    },
+
+    lastOtpSentAt: {
+        type: Date,
+        default: null
     }
 });
 

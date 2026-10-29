@@ -1,8 +1,8 @@
 const express = require("express");
 const { upload, validateImageContent } = require("./upload");
 const {
-    registerFarmer,
-    registerCustomer, addCrop,
+    sendOTP,
+    addCrop,
     getFarmerCrops,
     getCrops,
     placeOrder,
@@ -12,7 +12,6 @@ const {
     getFarmerOrders,
     markOrderDelivered,
     verifyOTP,
-    sendOTP,
     forgotPassword,
     verifyForgotPasswordOTP,
     resetPassword
@@ -20,6 +19,15 @@ const {
 const { signin } = require("./signincontroller");
 
 const router = express.Router();
+const registerWithOtp = (userType) => (req, res, next) => {
+    req.body = {
+        ...(req.body || {}),
+        userType
+    };
+    req.registrationRoute = true;
+    return sendOTP(req, res, next);
+};
+
 const deferPaymentHandler = (handlerName) => (req, res, next) => {
     try {
         return require("./paymentController")[handlerName](req, res, next);
@@ -28,9 +36,9 @@ const deferPaymentHandler = (handlerName) => (req, res, next) => {
     }
 };
 
-router.post("/farmer/register", registerFarmer);
+router.post("/farmer/register", registerWithOtp("farmer"));
 
-router.post("/customer/register", registerCustomer);
+router.post("/customer/register", registerWithOtp("customer"));
 router.post("/crop/add", upload.single("image"), validateImageContent, addCrop);
 router.post("/signin", signin);
 router.get("/crops/farmer/:farmerId", getFarmerCrops);
