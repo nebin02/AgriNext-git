@@ -31,6 +31,10 @@ const cropSchema = new mongoose.Schema({
     location: {
         type: String,
         required: true
+    },
+
+    imageUrl: {
+        type: String
     }
 
 });

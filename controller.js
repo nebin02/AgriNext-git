@@ -6,6 +6,8 @@ const sendOTPEmail = require("./emailService");
 const PendingVerification = require("./pendingverificationschema");
 const Order = require("./orderschema");
 const Notification = require("./notificationschema");
+const getSupabase = require("./supabase");
+const crypto = require("node:crypto");
 const {
     COMPLETED_ORDER_STATUS,
     calculateFirstOrderDiscount,
@@ -194,10 +196,12 @@ const registerCustomer = async (req, res) => {
 // ===============================
 
 const addCrop = async (req, res) => {
+    let uploadedPath;
 
     try {
-
-        console.log("Received crop data:", req.body);
+        if (!req.file) {
+            return res.status(400).json({ message: "Crop image is required" });
+        }
 
         const {
             farmerId,
@@ -209,46 +213,75 @@ const addCrop = async (req, res) => {
         } = req.body;
 
 
+        const extensionByType = {
+            "image/jpeg": "jpg",
+            "image/jpg": "jpg",
+            "image/png": "png",
+            "image/webp": "webp"
+        };
+        const bucket = process.env.SUPABASE_STORAGE_BUCKET;
+        if (!bucket) {
+            return res.status(503).json({ message: "Image storage is not configured" });
+        }
+
+        const supabase = getSupabase();
+        const objectName = `crops/${farmerId}/${crypto.randomUUID()}.${extensionByType[req.file.mimetype]}`;
+        const { error: uploadError } = await supabase.storage
+            .from(bucket)
+            .upload(objectName, req.file.buffer, {
+                contentType: req.file.mimetype,
+                upsert: false
+            });
+
+        if (uploadError) {
+            console.error("Supabase image upload failed:", uploadError.name || "StorageError");
+            return res.status(502).json({ message: "Unable to upload crop image" });
+        }
+
+        uploadedPath = objectName;
+        const { data: imageData } = supabase.storage
+            .from(bucket)
+            .getPublicUrl(objectName);
+
         const newCrop = new Crop({
-
-            farmerId: farmerId,
-            cropName: cropName,
-            quantity: quantity,
-            unit: unit,
-            price: price,
-            location: location
-
+            farmerId,
+            cropName,
+            quantity,
+            unit,
+            price,
+            location,
+            imageUrl: imageData.publicUrl
         });
-
 
         await newCrop.save();
 
-
-        console.log("Crop saved:", newCrop);
-
-
         return res.status(201).json({
-
             message: "Crop added successfully",
-
             crop: newCrop
-
         });
 
     } catch (error) {
+        if (uploadedPath) {
+            try {
+                const { error: cleanupError } = await getSupabase().storage
+                    .from(process.env.SUPABASE_STORAGE_BUCKET)
+                    .remove([uploadedPath]);
+                if (cleanupError) {
+                    console.error("Failed to clean up uploaded crop image:", cleanupError.name || "StorageError");
+                }
+            } catch (cleanupError) {
+                console.error("Failed to clean up uploaded crop image:", cleanupError.name);
+            }
+        }
 
-        console.log("CROP ERROR:", error);
-
+        console.error("Crop creation failed:", error.name, error.code || "");
+        if (error.name === "MissingStorageConfigurationError") {
+            return res.status(503).json({ message: "Image storage is not configured" });
+        }
         return res.status(500).json({
-
-            message: "Error adding crop",
-
-            error: error.message
-
+            message: "Error adding crop"
         });
-
     }
-
 };
 const getFarmerCrops = async (req, res) => {
 
