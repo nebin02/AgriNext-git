@@ -105,16 +105,23 @@ const getSmtpDiagnostic = (error) => {
 let transporter;
 
 const sendOTPEmail = async (email, otp) => {
-    let configuration;
-    try {
-        configuration = getSmtpConfiguration();
-    } catch (error) {
-        console.error("Email configuration error:", error.code, error.message);
-        throw error;
+    const apiKey = process.env.BREVO_API_KEY;
+    const senderEmail = process.env.EMAIL_FROM;
+
+    if (!apiKey || !senderEmail) {
+        console.error("Brevo configuration is missing.");
+
+        throw new EmailDeliveryError(
+            "BREVO_CONFIGURATION",
+            "BREVO_API_KEY or EMAIL_FROM is missing."
+        );
     }
 
-    if (!transporter) {
-        transporter = nodemailer.createTransport(configuration);
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(senderEmail.trim())) {
+        throw new EmailDeliveryError(
+            "BREVO_CONFIGURATION",
+            "EMAIL_FROM must be a valid verified sender address."
+        );
     }
 
     const escapedOtp = String(otp).replace(/[&<>"']/g, (character) => ({
@@ -125,31 +132,80 @@ const sendOTPEmail = async (email, otp) => {
         "'": "&#39;"
     })[character]);
 
-    try {
-        await transporter.sendMail({
-            from: `"AgriNext" <${configuration.from}>`,
-            to: email,
-            subject: "AgriNext Email Verification OTP",
-            text: `Your AgriNext verification code is ${otp}. It expires in 5 minutes.`,
-            html: `
-                <div style="font-family: Arial, sans-serif; max-width: 500px; margin: auto; padding: 30px; border: 1px solid #ddd; border-radius: 12px; background-color: #ffffff;">
-                    <h2 style="color: #2e7d32;">AgriNext</h2>
-                    <h3>Email Verification</h3>
-                    <p>Your AgriNext verification OTP is:</p>
-                    <div style="font-size: 32px; font-weight: bold; letter-spacing: 8px; color: #2e7d32; padding: 15px; text-align: center; background-color: #f1f8e9; border-radius: 8px;">${escapedOtp}</div>
-                    <p>This OTP is valid for <strong>5 minutes</strong>.</p>
-                    <p>If you did not request this OTP, you can safely ignore this email.</p>
+    const payload = {
+        sender: {
+            name: "AgriNext",
+            email: senderEmail.trim()
+        },
+        to: [
+            {
+                email: email
+            }
+        ],
+        subject: "AgriNext Email Verification OTP",
+        textContent: `Your AgriNext verification code is ${otp}. It expires in 5 minutes.`,
+        htmlContent: `
+            <div style="font-family: Arial, sans-serif; max-width: 500px; margin: auto; padding: 30px; border: 1px solid #ddd; border-radius: 12px;">
+                <h2 style="color: #2e7d32;">AgriNext</h2>
+                <h3>Email Verification</h3>
+                <p>Your AgriNext verification OTP is:</p>
+                <div style="font-size: 32px; font-weight: bold; letter-spacing: 8px; color: #2e7d32; padding: 15px; text-align: center; background-color: #f1f8e9; border-radius: 8px;">
+                    ${escapedOtp}
                 </div>
-            `
+                <p>This OTP is valid for <strong>5 minutes</strong>.</p>
+                <p>If you did not request this OTP, you can safely ignore this email.</p>
+            </div>
+        `
+    };
+
+    try {
+        const response = await fetch(
+            "https://api.brevo.com/v3/smtp/email",
+            {
+                method: "POST",
+                headers: {
+                    "accept": "application/json",
+                    "api-key": apiKey,
+                    "content-type": "application/json"
+                },
+                body: JSON.stringify(payload),
+                signal: AbortSignal.timeout(15000)
+            }
+        );
+
+        if (!response.ok) {
+            const errorBody = await response.text();
+
+            console.error("Brevo API error:", {
+                status: response.status,
+                response: errorBody.slice(0, 500)
+            });
+
+            throw new EmailDeliveryError(
+                "BREVO_API_FAILED",
+                `Brevo API returned HTTP ${response.status}`
+            );
+        }
+
+        const result = await response.json();
+
+        console.log("AgriNext OTP email accepted by Brevo.", {
+            messageId: result.messageId
         });
+
+        return result;
+
     } catch (error) {
-        const diagnostic = getSmtpDiagnostic(error);
-        console.error("Email delivery failed:", diagnostic.code, {
-            smtpCode: error.code,
-            responseCode: error.responseCode,
-            command: error.command
-        });
-        throw new EmailDeliveryError(diagnostic.code, diagnostic.message);
+        if (error instanceof EmailDeliveryError) {
+            throw error;
+        }
+
+        console.error("Brevo email request failed:", error.message);
+
+        throw new EmailDeliveryError(
+            "BREVO_CONNECTION_FAILED",
+            "Could not connect to Brevo email API."
+        );
     }
 };
 
