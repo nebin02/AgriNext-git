@@ -10,13 +10,19 @@ const app = express();
 const allowedOrigins = (process.env.FRONTEND_URL || "http://localhost:5173")
     .split(",")
     .map((origin) => origin.trim())
+    .map((origin) => origin.replace(/\/+$/, ""))
     .filter(Boolean);
 
-app.use(cors({
+const corsOptions = {
     origin(origin, callback) {
         callback(null, !origin || allowedOrigins.includes(origin));
-    }
-}));
+    },
+    methods: ["GET", "HEAD", "PUT", "PATCH", "POST", "DELETE", "OPTIONS"],
+    optionsSuccessStatus: 204
+};
+
+app.options(/.*/, cors(corsOptions));
+app.use(cors(corsOptions));
 app.use(express.json());
 
 app.get("/health", (req, res) => {
