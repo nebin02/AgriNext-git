@@ -10,9 +10,20 @@ class EmailDeliveryError extends Error {
     }
 }
 
+
 const getSmtpConfiguration = (env = process.env) => {
-    const requiredVariables = ["SMTP_HOST", "SMTP_PORT", "SMTP_USER", "SMTP_PASS", "EMAIL_FROM"];
-    const missingVariables = requiredVariables.filter((name) => !env[name]?.trim());
+    const requiredVariables = [
+        "SMTP_HOST",
+        "SMTP_PORT",
+        "SMTP_USER",
+        "SMTP_PASS",
+        "EMAIL_FROM"
+    ];
+
+    const missingVariables = requiredVariables.filter(
+        (name) => !env[name]?.trim()
+    );
+
     if (missingVariables.length) {
         throw new EmailDeliveryError(
             "SMTP_CONFIGURATION",
@@ -20,12 +31,15 @@ const getSmtpConfiguration = (env = process.env) => {
         );
     }
 
-   if (!Number.isInteger(port) || ![465, 587, 2525].includes(port)) {
-    throw new EmailDeliveryError(
-        "SMTP_CONFIGURATION",
-        "SMTP_PORT must be 465, 587, or 2525"
-    );
-}
+    // Read and convert SMTP_PORT from environment variables
+    const port = Number(env.SMTP_PORT.trim());
+
+    if (!Number.isInteger(port) || ![465, 587, 2525].includes(port)) {
+        throw new EmailDeliveryError(
+            "SMTP_CONFIGURATION",
+            "SMTP_PORT must be 465, 587, or 2525"
+        );
+    }
 
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(env.EMAIL_FROM.trim())) {
         throw new EmailDeliveryError(
@@ -48,6 +62,7 @@ const getSmtpConfiguration = (env = process.env) => {
         socketTimeout: 20000
     };
 };
+
 
 const getSmtpDiagnostic = (error) => {
     const response = typeof error.response === "string" ? error.response : "";
