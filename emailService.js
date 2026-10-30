@@ -20,13 +20,12 @@ const getSmtpConfiguration = (env = process.env) => {
         );
     }
 
-    const port = Number(env.SMTP_PORT);
-    if (!Number.isInteger(port) || ![465, 587].includes(port)) {
-        throw new EmailDeliveryError(
-            "SMTP_CONFIGURATION",
-            "SMTP_PORT must be 465 or 587"
-        );
-    }
+   if (!Number.isInteger(port) || ![465, 587, 2525].includes(port)) {
+    throw new EmailDeliveryError(
+        "SMTP_CONFIGURATION",
+        "SMTP_PORT must be 465, 587, or 2525"
+    );
+}
 
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(env.EMAIL_FROM.trim())) {
         throw new EmailDeliveryError(
